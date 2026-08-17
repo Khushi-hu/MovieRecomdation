@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import joblib
 import requests
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors
 
 
 # =========================================
@@ -16,25 +18,81 @@ st.set_page_config(
 
 
 # =========================================
-# LOAD MODEL FILES
+# LOAD MOVIES
 # =========================================
 
-movies = joblib.load("movies.pkl")
-similarity = joblib.load("similarity.pkl")
+@st.cache_data
+def load_movies():
+
+    movies = joblib.load("movies.pkl")
+
+    movies["tags"] = (
+        movies["tags"]
+        .fillna("")
+        .astype(str)
+    )
+
+    return movies
+
+
+movies = load_movies()
+
+
+# =========================================
+# CREATE TF-IDF MODEL
+# =========================================
+
+@st.cache_resource
+def create_recommendation_model(movies):
+
+    vectorizer = TfidfVectorizer(
+        max_features=10000,
+        stop_words="english"
+    )
+
+    vectors = vectorizer.fit_transform(
+        movies["tags"]
+    )
+
+    model = NearestNeighbors(
+        n_neighbors=6,
+        metric="cosine",
+        algorithm="brute"
+    )
+
+    model.fit(vectors)
+
+    return vectorizer, model, vectors
+
+
+vectorizer, model, vectors = create_recommendation_model(
+    movies
+)
 
 
 # =========================================
 # TMDB API KEY
 # =========================================
 
-TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
+try:
+
+    TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
+
+except Exception:
+
+    TMDB_API_KEY = ""
 
 
 # =========================================
 # GET MOVIE DETAILS FROM TMDB
 # =========================================
 
+@st.cache_data(ttl=3600)
 def get_movie_details(movie_title):
+
+    if not TMDB_API_KEY:
+
+        return None
 
     url = "https://api.themoviedb.org/3/search/movie"
 
@@ -53,15 +111,15 @@ def get_movie_details(movie_title):
 
         response.raise_for_status()
 
+        data = response.json()
+
     except requests.exceptions.RequestException:
 
         return None
 
-    data = response.json()
-
     results = data.get("results", [])
 
-    if len(results) == 0:
+    if not results:
 
         return None
 
@@ -79,29 +137,38 @@ def get_movie_details(movie_title):
 # RECOMMENDATION FUNCTION
 # =========================================
 
-def recommend(movie):
+def recommend(movie_title):
 
-    movie_index = movies[
-        movies["title"] == movie
-    ].index[0]
+    movie_indices = movies.index[
+        movies["title"] == movie_title
+    ].tolist()
 
-    distances = similarity[movie_index]
+    if not movie_indices:
 
-    movie_list = sorted(
-        list(enumerate(distances)),
-        reverse=True,
-        key=lambda x: x[1]
-    )[1:6]
+        return []
+
+    movie_index = movie_indices[0]
+
+    movie_vector = vectors[movie_index]
+
+    distances, indices = model.kneighbors(
+        movie_vector,
+        n_neighbors=6
+    )
 
     recommendations = []
 
-    for i in movie_list:
+    for index in indices[0]:
+
+        if index == movie_index:
+
+            continue
 
         recommendations.append(
-            movies.iloc[i[0]]["title"]
+            movies.iloc[index]["title"]
         )
 
-    return recommendations
+    return recommendations[:5]
 
 
 # =========================================
@@ -119,7 +186,12 @@ st.write(
 # MOVIE SELECTION
 # =========================================
 
-movie_list = movies["title"].dropna().sort_values().values
+movie_list = (
+    movies["title"]
+    .dropna()
+    .sort_values()
+    .values
+)
 
 selected_movie = st.selectbox(
     "🔎 Select a movie",
@@ -131,105 +203,106 @@ selected_movie = st.selectbox(
 # RECOMMEND BUTTON
 # =========================================
 
-if st.button("🎯 Recommend Movies"):
+if st.button(
+    "🍿 Recommend Movies",
+    key="recommend_button"
+):
 
-    recommendations = recommend(selected_movie)
-
-    st.subheader(
-        f"Movies similar to {selected_movie}"
+    recommendations = recommend(
+        selected_movie
     )
 
-    columns = st.columns(5)
+    st.subheader(
+        f"🎬 Movies similar to {selected_movie}"
+    )
 
-    for column, movie in zip(
-        columns,
-        recommendations
-    ):
+    if not recommendations:
 
-        with column:
+        st.warning(
+            "No recommendations found."
+        )
 
-            details = get_movie_details(movie)
+    else:
 
-            # ---------------------------------
-            # TMDB DETAILS AVAILABLE
-            # ---------------------------------
+        columns = st.columns(5)
 
-            if details is not None:
+        for column, movie in zip(
+            columns,
+            recommendations
+        ):
 
-                poster = details["poster"]
+            with column:
 
-                # Movie poster
-                if poster:
+                details = get_movie_details(
+                    movie
+                )
 
-                    poster_url = (
-                        "https://image.tmdb.org/t/p/w500"
-                        + poster
+                # ---------------------------------
+                # TMDB DETAILS AVAILABLE
+                # ---------------------------------
+
+                if details is not None:
+
+                    poster = details["poster"]
+
+                    if poster:
+
+                        poster_url = (
+                            "https://image.tmdb.org/t/p/w500"
+                            + poster
+                        )
+
+                        st.image(
+                            poster_url,
+                            use_container_width=True
+                        )
+
+                    else:
+
+                        st.write(
+                            "🎬 No poster available"
+                        )
+
+                    st.markdown(
+                        f"### {movie}"
                     )
 
-                    st.image(
-                        poster_url,
-                        use_container_width=True
+                    rating = details["rating"]
+
+                    if rating:
+
+                        st.write(
+                            f"⭐ Rating: {rating:.1f}/10"
+                        )
+
+                    release_date = (
+                        details["release_date"]
                     )
+
+                    if release_date:
+
+                        st.write(
+                            f"📅 {release_date}"
+                        )
+
+                    overview = details["overview"]
+
+                    if overview:
+
+                        st.write(
+                            overview
+                        )
+
+                # ---------------------------------
+                # TMDB NOT AVAILABLE
+                # ---------------------------------
 
                 else:
 
-                    st.write("🎬 No poster available")
-
-                # Movie title
-                st.markdown(
-                    f"### {movie}"
-                )
-
-                # Rating
-                rating = details["rating"]
-
-                if rating:
-
-                    st.write(
-                        f"⭐ {rating:.1f}/10"
+                    st.markdown(
+                        f"### 🎬 {movie}"
                     )
 
-                # Release year
-                release_date = details["release_date"]
-
-                if release_date:
-
-                    st.write(
-                        f"📅 {release_date[:4]}"
+                    st.info(
+                        "Movie details are currently unavailable."
                     )
-
-                # Overview
-                overview = details["overview"]
-
-                if overview:
-
-                    if len(overview) > 180:
-
-                        overview = overview[:180] + "..."
-
-                    st.write(overview)
-
-            # ---------------------------------
-            # TMDB NOT AVAILABLE
-            # ---------------------------------
-
-            else:
-
-                st.markdown(
-                    f"### {movie}"
-                )
-
-                st.warning(
-                    "Movie information unavailable."
-                )
-
-
-# =========================================
-# FOOTER
-# =========================================
-
-st.divider()
-
-st.caption(
-    "Movie data and images provided by TMDB."
-)
